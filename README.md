@@ -10,6 +10,9 @@ Whether you’re collecting forensic images, monitoring log sources, or just kee
 
 ---
 
+<img width="756" height="617" alt="image" src="https://github.com/user-attachments/assets/cbb774af-35b1-4f49-aeaa-0b78d3074b93" />
+
+
 ## ✅ Features
 - **Two-Way Monitoring**: Choose to watch either your local folder or the remote server.  
 - **Real-Time Sync**: Automatically uploads, downloads, or deletes files as changes occur.  
