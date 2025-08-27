@@ -37,8 +37,8 @@ Clone and run:
 ```bash
 git clone https://github.com/dfirvault/sftpmonitor/
 cd sftpmonitor
-pip install -r requirements.txt
-python main.py
+pip install paramiko watchdog
+python SFTPMonitor.py
 ```
 
 ---
