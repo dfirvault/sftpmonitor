@@ -608,17 +608,20 @@ def get_user_input():
         print(f"{Colors.RED}No local folder selected. Exiting.{Colors.END}")
         sys.exit(1)
     
-    # Monitoring direction with clear explanation
+    # Monitoring direction with clear explanation - FIXED LOGIC
     print(f"\n{Colors.HEADER}Monitoring Direction Options:{Colors.END}")
     print(f"{Colors.YELLOW}1. REMOTE monitoring: Watch the remote server for changes and download them locally{Colors.END}")
     print(f"{Colors.YELLOW}2. LOCAL monitoring: Watch your local folder for changes and upload them to the server{Colors.END}")
-    
+
     direction = input(f"\n{Colors.CYAN}Enter 'remote' or 'local' to choose monitoring direction: {Colors.END}").lower().strip()
-    config['monitor_remote'] = direction.startswith('r') if direction else False
-    
+
+    # Default to REMOTE monitoring if no input
     if not direction:
         print(f"{Colors.YELLOW}No direction selected. Defaulting to REMOTE monitoring.{Colors.END}")
         config['monitor_remote'] = True
+    else:
+        # Set based on user input - 'remote' or anything starting with 'r' = True, else False
+        config['monitor_remote'] = direction.startswith('r')
     
     return config
 
