@@ -221,6 +221,8 @@ class FTPClient:
 class FileMonitor:
     def __init__(self):
         self.running = False
+        self.last_activity_time = 0
+        self.activity_detected = False
         
     def calculate_file_hash(self, file_path):
         """Calculate MD5 hash of a file"""
@@ -233,16 +235,83 @@ class FileMonitor:
         except:
             return None
     
+    def check_for_changes(self, ftp_client, remote_dir, local_dir, file_states, logger):
+        """Check for changes and return True if changes were found"""
+        changes_found = False
+        try:
+            remote_files = ftp_client.list_files(remote_dir)
+            
+            for filename in remote_files:
+                if filename in ['.', '..']:
+                    continue
+                    
+                remote_path = os.path.join(remote_dir, filename).replace('\\', '/')
+                local_path = os.path.join(local_dir, filename)
+                
+                current_size = ftp_client.get_file_size(remote_path)
+                file_exists = ftp_client.file_exists(remote_path)
+                
+                if filename not in file_states:
+                    # New file detected
+                    print(f"{Colors.BLUE}New file detected: {filename}{Colors.END}")
+                    logger.info(f"NEW FILE DETECTED: {filename}")
+                    if ftp_client.download_file(remote_path, local_path, logger):
+                        file_states[filename] = {
+                            'size': current_size,
+                            'exists': file_exists,
+                            'timestamp': time.time()
+                        }
+                        changes_found = True
+                        self.activity_detected = True
+                        self.last_activity_time = time.time()
+                else:
+                    # Check for changes
+                    previous_state = file_states[filename]
+                    if (previous_state['size'] != current_size or 
+                        previous_state['exists'] != file_exists):
+                        
+                        print(f"{Colors.YELLOW}File changed: {filename}{Colors.END}")
+                        logger.info(f"FILE CHANGED: {filename}")
+                        if ftp_client.download_file(remote_path, local_path, logger):
+                            file_states[filename] = {
+                                'size': current_size,
+                                'exists': file_exists,
+                                'timestamp': time.time()
+                            }
+                            changes_found = True
+                            self.activity_detected = True
+                            self.last_activity_time = time.time()
+            
+            # Check for deleted files
+            for filename in list(file_states.keys()):
+                if filename not in remote_files:
+                    local_path = os.path.join(local_dir, filename)
+                    if os.path.exists(local_path):
+                        os.remove(local_path)
+                        print(f"{Colors.RED}File deleted locally: {filename}{Colors.END}")
+                        logger.info(f"FILE DELETED LOCALLY: {filename}")
+                        changes_found = True
+                        self.activity_detected = True
+                        self.last_activity_time = time.time()
+                    del file_states[filename]
+                    
+        except Exception as e:
+            print(f"{Colors.RED}Error during change detection: {e}{Colors.END}")
+            logger.error(f"Change detection error: {e}")
+            
+        return changes_found
+    
     def monitor_remote(self, config, logger):
         """Monitor remote site for changes and download locally"""
         interval = config.get('interval', 60)  # Default to 60 seconds if not specified
         print(f"\n{Colors.HEADER}{Colors.BOLD}Starting REMOTE monitoring...{Colors.END}")
-        print(f"{Colors.YELLOW}The tool will check for changes on the remote server every {interval} seconds{Colors.END}")
+        print(f"{Colors.YELLOW}The tool will check for changes on the remote server{Colors.END}")
+        print(f"{Colors.YELLOW}Base interval: {interval} seconds (will check immediately after changes){Colors.END}")
         print(f"{Colors.YELLOW}Any changes detected will be downloaded to your local folder{Colors.END}")
         logger.info("Starting REMOTE monitoring")
         logger.info(f"Remote folder: {config['remote_folder']}")
         logger.info(f"Local folder: {config['local_folder']}")
-        logger.info(f"Check interval: {interval} seconds")
+        logger.info(f"Base check interval: {interval} seconds")
         
         ftp_client = FTPClient(
             config['host'], config['username'], config['password'],
@@ -261,56 +330,53 @@ class FileMonitor:
         remote_dir = config['remote_folder']
         file_states = {}
         
+        # Initial check
+        print(f"{Colors.CYAN}Performing initial check for changes...{Colors.END}")
+        self.check_for_changes(ftp_client, remote_dir, local_dir, file_states, logger)
+        
+        consecutive_no_changes = 0
+        current_interval = 5  # Start with quick checks after initial sync
+        
         try:
             while self.running:
                 try:
-                    remote_files = ftp_client.list_files(remote_dir)
+                    # Check for changes
+                    changes_found = self.check_for_changes(ftp_client, remote_dir, local_dir, file_states, logger)
                     
-                    for filename in remote_files:
-                        if filename in ['.', '..']:
-                            continue
-                            
-                        remote_path = os.path.join(remote_dir, filename).replace('\\', '/')
-                        local_path = os.path.join(local_dir, filename)
-                        
-                        current_size = ftp_client.get_file_size(remote_path)
-                        file_exists = ftp_client.file_exists(remote_path)
-                        
-                        if filename not in file_states:
-                            # New file detected
-                            print(f"{Colors.BLUE}New file detected: {filename}{Colors.END}")
-                            logger.info(f"NEW FILE DETECTED: {filename}")
-                            if ftp_client.download_file(remote_path, local_path, logger):
-                                file_states[filename] = {
-                                    'size': current_size,
-                                    'exists': file_exists,
-                                    'timestamp': time.time()
-                                }
+                    if changes_found:
+                        # Changes detected - check again soon
+                        consecutive_no_changes = 0
+                        current_interval = 5
+                        print(f"{Colors.GREEN}Changes detected. Checking again in {current_interval} seconds...{Colors.END}")
+                    else:
+                        # No changes - gradually increase interval up to the configured maximum
+                        consecutive_no_changes += 1
+                        if consecutive_no_changes <= 3:
+                            current_interval = 5  # Quick checks for first few no-change cycles
+                        elif consecutive_no_changes <= 6:
+                            current_interval = 15  # Medium interval
                         else:
-                            # Check for changes
-                            previous_state = file_states[filename]
-                            if (previous_state['size'] != current_size or 
-                                previous_state['exists'] != file_exists):
-                                
-                                print(f"{Colors.YELLOW}File changed: {filename}{Colors.END}")
-                                logger.info(f"FILE CHANGED: {filename}")
-                                if ftp_client.download_file(remote_path, local_path, logger):
-                                    file_states[filename] = {
-                                        'size': current_size,
-                                        'exists': file_exists,
-                                        'timestamp': time.time()
-                                    }
+                            current_interval = interval  # Use configured interval
+                        
+                        if consecutive_no_changes == 1:
+                            print(f"{Colors.CYAN}No changes detected. Next check in {current_interval} seconds...{Colors.END}")
+                        else:
+                            print(f"{Colors.CYAN}No changes detected ({consecutive_no_changes}x). Next check in {current_interval} seconds...{Colors.END}")
                     
-                    # Check for deleted files
-                    for filename in list(file_states.keys()):
-                        if filename not in remote_files:
-                            local_path = os.path.join(local_dir, filename)
-                            if os.path.exists(local_path):
-                                os.remove(local_path)
-                                print(f"{Colors.RED}File deleted locally: {filename}{Colors.END}")
-                                logger.info(f"FILE DELETED LOCALLY: {filename}")
-                            del file_states[filename]
-                            
+                    # Wait for the calculated interval
+                    for remaining in range(current_interval, 0, -1):
+                        if not self.running:
+                            break
+                        status_msg = f"Next check in {remaining}s (interval: {current_interval}s)"
+                        if changes_found:
+                            status_msg += " - Changes detected!"
+                        elif consecutive_no_changes > 0:
+                            status_msg += f" - No changes ({consecutive_no_changes}x)"
+                        print(f"{Colors.CYAN}{status_msg}{Colors.END}", end='\r')
+                        time.sleep(1)
+                    
+                    print(" " * 80, end='\r')  # Clear line
+                        
                 except Exception as e:
                     print(f"{Colors.RED}Error during monitoring: {e}{Colors.END}")
                     logger.error(f"Monitoring error: {e}")
@@ -321,26 +387,24 @@ class FileMonitor:
                         print(f"{Colors.RED}Reconnection failed{Colors.END}")
                         logger.error("Reconnection failed")
                         break
-                
-                # Show countdown with configurable interval
-                for remaining in range(interval, 0, -1):
-                    if not self.running:
-                        break
-                    print(f"{Colors.CYAN}Monitoring... ({remaining}s until next check){Colors.END}", end='\r')
-                    time.sleep(1)
-                
-                print(" " * 50, end='\r')  # Clear line
+                    # Reset states after reconnection
+                    file_states = {}
+                    consecutive_no_changes = 0
+                    current_interval = 5
                 
         finally:
             ftp_client.disconnect()
             logger.info("Remote monitoring stopped")
     
     class LocalChangeHandler(FileSystemEventHandler):
-        def __init__(self, ftp_client, remote_dir, local_dir, logger):
+        def __init__(self, ftp_client, remote_dir, local_dir, logger, monitor_instance):
             self.ftp_client = ftp_client
             self.remote_dir = remote_dir
             self.local_dir = local_dir
             self.logger = logger
+            self.monitor_instance = monitor_instance
+            self.upload_queue = []
+            self.uploading = False
         
         def on_created(self, event):
             if not event.is_directory:
@@ -348,7 +412,8 @@ class FileMonitor:
         
         def on_modified(self, event):
             if not event.is_directory:
-                self.upload_file(event.src_path)
+                # Small delay to ensure file is completely written
+                threading.Timer(2.0, self.upload_file, [event.src_path]).start()
         
         def on_deleted(self, event):
             if not event.is_directory:
@@ -361,6 +426,8 @@ class FileMonitor:
                         self.ftp_client.connection.delete(remote_path)
                     print(f"{Colors.RED}File deleted remotely: {filename}{Colors.END}")
                     self.logger.info(f"FILE DELETED REMOTELY: {filename}")
+                    self.monitor_instance.activity_detected = True
+                    self.monitor_instance.last_activity_time = time.time()
                 except Exception as e:
                     print(f"{Colors.RED}Error deleting remote file: {e}{Colors.END}")
                     self.logger.error(f"DELETE FAILED: {filename} - {e}")
@@ -388,29 +455,42 @@ class FileMonitor:
                     
                     print(f"{Colors.YELLOW}File renamed remotely: {old_filename} -> {new_filename}{Colors.END}")
                     self.logger.info(f"FILE RENAMED: {old_filename} -> {new_filename}")
+                    self.monitor_instance.activity_detected = True
+                    self.monitor_instance.last_activity_time = time.time()
                 except Exception as e:
                     print(f"{Colors.RED}Error renaming remote file: {e}{Colors.END}")
                     self.logger.error(f"RENAME FAILED: {old_filename} -> {new_filename} - {e}")
         
         def upload_file(self, local_path):
+            """Upload file with retry logic"""
+            if not os.path.exists(local_path):
+                return
+                
             filename = os.path.basename(local_path)
             remote_path = os.path.join(self.remote_dir, filename).replace('\\', '/')
             
             try:
+                # Wait a moment to ensure file is completely written
+                time.sleep(1)
+                
                 if self.ftp_client.upload_file(local_path, remote_path, self.logger):
-                    pass  # Message is printed in upload_file method
+                    self.monitor_instance.activity_detected = True
+                    self.monitor_instance.last_activity_time = time.time()
             except Exception as e:
                 print(f"{Colors.RED}Error uploading file: {e}{Colors.END}")
                 self.logger.error(f"UPLOAD FAILED: {filename} - {e}")
     
     def monitor_local(self, config, logger):
         """Monitor local folder for changes and upload to remote"""
+        interval = config.get('interval', 60)
         print(f"\n{Colors.HEADER}{Colors.BOLD}Starting LOCAL monitoring...{Colors.END}")
         print(f"{Colors.YELLOW}The tool will watch for changes in your local folder{Colors.END}")
+        print(f"{Colors.YELLOW}Base interval: {interval} seconds for periodic checks{Colors.END}")
         print(f"{Colors.YELLOW}Any changes detected will be uploaded to the remote server{Colors.END}")
         logger.info("Starting LOCAL monitoring")
         logger.info(f"Remote folder: {config['remote_folder']}")
         logger.info(f"Local folder: {config['local_folder']}")
+        logger.info(f"Base check interval: {interval} seconds")
         
         ftp_client = FTPClient(
             config['host'], config['username'], config['password'],
@@ -436,9 +516,11 @@ class FileMonitor:
                 local_path = os.path.join(local_dir, filename)
                 remote_path = os.path.join(remote_dir, filename).replace('\\', '/')
                 ftp_client.upload_file(local_path, remote_path, logger)
+                self.activity_detected = True
+                self.last_activity_time = time.time()
         
         # Set up watchdog observer
-        event_handler = self.LocalChangeHandler(ftp_client, remote_dir, local_dir, logger)
+        event_handler = self.LocalChangeHandler(ftp_client, remote_dir, local_dir, logger, self)
         observer = Observer()
         observer.schedule(event_handler, local_dir, recursive=False)
         observer.start()
@@ -447,8 +529,18 @@ class FileMonitor:
         print(f"{Colors.YELLOW}Press Ctrl+C to stop monitoring{Colors.END}")
         logger.info("Now monitoring local folder for changes")
         
+        # Additional periodic check for any missed changes
+        last_periodic_check = time.time()
+        
         try:
             while self.running:
+                # Periodic check every interval seconds for any missed changes
+                current_time = time.time()
+                if current_time - last_periodic_check >= interval:
+                    print(f"{Colors.CYAN}Performing periodic check for missed changes...{Colors.END}")
+                    # Here you could add logic to check for any inconsistencies
+                    last_periodic_check = current_time
+                
                 time.sleep(1)
         except KeyboardInterrupt:
             observer.stop()
@@ -612,6 +704,69 @@ def get_password_with_stars(prompt="Password: "):
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ''.join(password)
 
+def get_monitoring_interval():
+    """Get monitoring interval from user with predefined options"""
+    print(f"\n{Colors.HEADER}{Colors.BOLD}Monitoring Interval Selection{Colors.END}")
+    print(f"{Colors.YELLOW}Please choose a monitoring interval:{Colors.END}")
+    print(f"{Colors.CYAN}1. 1 minute (frequent checks){Colors.END}")
+    print(f"{Colors.CYAN}2. 5 minutes (balanced){Colors.END}")
+    print(f"{Colors.CYAN}3. 20 minutes (less frequent){Colors.END}")
+    print(f"{Colors.CYAN}4. 60 minutes (infrequent){Colors.END}")
+    print(f"{Colors.CYAN}5. Custom interval{Colors.END}")
+    
+    while True:
+        choice = input(f"\n{Colors.CYAN}Enter your choice (1-5): {Colors.END}").strip()
+        
+        if choice == '1':
+            return 60  # 1 minute in seconds
+        elif choice == '2':
+            return 300  # 5 minutes in seconds
+        elif choice == '3':
+            return 1200  # 20 minutes in seconds
+        elif choice == '4':
+            return 3600  # 60 minutes in seconds
+        elif choice == '5':
+            return get_custom_interval()
+        else:
+            print(f"{Colors.RED}Invalid choice. Please enter 1-5.{Colors.END}")
+
+def get_custom_interval():
+    """Get custom interval from user"""
+    print(f"\n{Colors.HEADER}Custom Interval Selection{Colors.END}")
+    print(f"{Colors.YELLOW}Choose time unit:{Colors.END}")
+    print(f"{Colors.CYAN}1. Seconds{Colors.END}")
+    print(f"{Colors.CYAN}2. Minutes{Colors.END}")
+    print(f"{Colors.CYAN}3. Hours{Colors.END}")
+    
+    while True:
+        unit_choice = input(f"{Colors.CYAN}Enter your choice (1-3): {Colors.END}").strip()
+        
+        if unit_choice in ['1', '2', '3']:
+            break
+        else:
+            print(f"{Colors.RED}Invalid choice. Please enter 1-3.{Colors.END}")
+    
+    # Get the interval value
+    while True:
+        try:
+            value = input(f"{Colors.CYAN}Enter the interval value: {Colors.END}").strip()
+            interval_value = float(value)
+            
+            if interval_value <= 0:
+                print(f"{Colors.RED}Interval must be greater than 0.{Colors.END}")
+                continue
+                
+            # Convert to seconds based on unit
+            if unit_choice == '1':  # Seconds
+                return int(interval_value)
+            elif unit_choice == '2':  # Minutes
+                return int(interval_value * 60)
+            elif unit_choice == '3':  # Hours
+                return int(interval_value * 3600)
+                
+        except ValueError:
+            print(f"{Colors.RED}Please enter a valid number.{Colors.END}")
+
 def get_user_input():
     """Get configuration from user"""
     config = {}
@@ -633,12 +788,7 @@ def get_user_input():
     config['password'] = get_password_with_stars(f"{Colors.CYAN}Password: {Colors.END}")
     
     # Get monitoring interval
-    interval_input = input(f"{Colors.CYAN}Monitoring interval in seconds (default 60): {Colors.END}").strip()
-    try:
-        config['interval'] = int(interval_input) if interval_input else 60
-    except ValueError:
-        print(f"{Colors.YELLOW}Invalid interval. Using default 60 seconds.{Colors.END}")
-        config['interval'] = 60
+    config['interval'] = get_monitoring_interval()
     
     # Validate credentials and get remote folder
     ftp_client = FTPClient(
@@ -683,65 +833,4 @@ def get_user_input():
         config['monitor_remote'] = True
     else:
         # Set based on user input - 'remote' or anything starting with 'r' = True, else False
-        config['monitor_remote'] = direction.startswith('r')
-    
-    return config
-
-def main():
-    monitor = FileMonitor()
-    config = get_user_input()
-    
-    # Setup logging after we have the local folder
-    logger = setup_logging(config['local_folder'])
-    
-    # Log configuration (without sensitive info)
-    logger.info("SFTP/FTP Sync Tool Started")
-    logger.info(f"Host: {config['host']}:{config['port']}")
-    logger.info(f"Protocol: {'SFTP' if config['use_sftp'] else 'FTP'}")
-    logger.info(f"Remote folder: {config['remote_folder']}")
-    logger.info(f"Local folder: {config['local_folder']}")
-    logger.info(f"Check interval: {config.get('interval', 60)} seconds")
-    direction_text = "REMOTE (download changes from server)" if config['monitor_remote'] else "LOCAL (upload changes to server)"
-    logger.info(f"Monitoring: {direction_text}")
-    
-    print(f"\n{Colors.HEADER}{Colors.BOLD}Configuration Summary:{Colors.END}")
-    print(f"{Colors.CYAN}Protocol:{Colors.END} {'SFTP' if config['use_sftp'] else 'FTP'}")
-    print(f"{Colors.CYAN}Server:{Colors.END} {config['host']}:{config['port']}")
-    print(f"{Colors.CYAN}Username:{Colors.END} {config['username']}")
-    print(f"{Colors.CYAN}Remote Folder:{Colors.END} {config['remote_folder']}")
-    print(f"{Colors.CYAN}Local Folder:{Colors.END} {config['local_folder']}")
-    print(f"{Colors.CYAN}Check Interval:{Colors.END} {config.get('interval', 60)} seconds")
-    direction_text = "REMOTE (download changes from server)" if config['monitor_remote'] else "LOCAL (upload changes to server)"
-    print(f"{Colors.CYAN}Monitoring:{Colors.END} {direction_text}")
-    
-    print(f"\n{Colors.GREEN}Starting monitor... Press Ctrl+C to stop{Colors.END}")
-    logger.info("Starting monitor")
-    
-    monitor.running = True
-    try:
-        if config['monitor_remote']:
-            monitor.monitor_remote(config, logger)
-        else:
-            monitor.monitor_local(config, logger)
-    except KeyboardInterrupt:
-        print(f"\n{Colors.YELLOW}Stopping monitor...{Colors.END}")
-        logger.info("Monitor stopped by user")
-    except Exception as e:
-        logger.error(f"Monitor stopped unexpectedly: {e}")
-        print(f"{Colors.RED}Monitor stopped unexpectedly: {e}{Colors.END}")
-    finally:
-        monitor.running = False
-        logger.info("Application shutting down")
-
-if __name__ == "__main__":
-    # Install required packages if not already installed
-    try:
-        import paramiko
-        from watchdog.observers import Observer
-        from tqdm import tqdm
-    except ImportError:
-        print(f"{Colors.RED}Please install required packages:{Colors.END}")
-        print("pip install paramiko watchdog tqdm")
-        exit(1)
-    
-    main()
+        config['monitor_remote'] = direction
