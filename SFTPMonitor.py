@@ -235,12 +235,14 @@ class FileMonitor:
     
     def monitor_remote(self, config, logger):
         """Monitor remote site for changes and download locally"""
+        interval = config.get('interval', 60)  # Default to 60 seconds if not specified
         print(f"\n{Colors.HEADER}{Colors.BOLD}Starting REMOTE monitoring...{Colors.END}")
-        print(f"{Colors.YELLOW}The tool will check for changes on the remote server every 60 seconds{Colors.END}")
+        print(f"{Colors.YELLOW}The tool will check for changes on the remote server every {interval} seconds{Colors.END}")
         print(f"{Colors.YELLOW}Any changes detected will be downloaded to your local folder{Colors.END}")
         logger.info("Starting REMOTE monitoring")
         logger.info(f"Remote folder: {config['remote_folder']}")
         logger.info(f"Local folder: {config['local_folder']}")
+        logger.info(f"Check interval: {interval} seconds")
         
         ftp_client = FTPClient(
             config['host'], config['username'], config['password'],
@@ -320,8 +322,8 @@ class FileMonitor:
                         logger.error("Reconnection failed")
                         break
                 
-                # Show countdown with actual seconds
-                for remaining in range(60, 0, -1):
+                # Show countdown with configurable interval
+                for remaining in range(interval, 0, -1):
                     if not self.running:
                         break
                     print(f"{Colors.CYAN}Monitoring... ({remaining}s until next check){Colors.END}", end='\r')
@@ -560,6 +562,56 @@ def select_remote_folder(ftp_client):
     
     return getattr(root, 'selected_path', None)
 
+def get_password_with_stars(prompt="Password: "):
+    """Get password input with * symbols instead of blank"""
+    if sys.platform == "win32":
+        # Windows doesn't support getpass with custom prompt characters easily
+        # So we'll use a simple approach for Windows
+        import msvcrt
+        print(prompt, end='', flush=True)
+        password = []
+        while True:
+            ch = msvcrt.getch()
+            if ch in [b'\r', b'\n']:  # Enter key
+                print()
+                break
+            elif ch == b'\x08':  # Backspace
+                if password:
+                    password.pop()
+                    print('\b \b', end='', flush=True)
+            else:
+                password.append(ch.decode('utf-8'))
+                print('*', end='', flush=True)
+        return ''.join(password)
+    else:
+        # For Unix/Linux/Mac, we can use a more sophisticated approach
+        import termios
+        import tty
+        
+        print(prompt, end='', flush=True)
+        password = []
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch in ['\r', '\n']:  # Enter key
+                    print()
+                    break
+                elif ch == '\x7f':  # Backspace
+                    if password:
+                        password.pop()
+                        print('\b \b', end='', flush=True)
+                elif ch == '\x03':  # Ctrl+C
+                    raise KeyboardInterrupt
+                else:
+                    password.append(ch)
+                    print('*', end='', flush=True)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        return ''.join(password)
+
 def get_user_input():
     """Get configuration from user"""
     config = {}
@@ -576,7 +628,17 @@ def get_user_input():
     port_input = input(f"{Colors.CYAN}Port (default {default_port}): {Colors.END}").strip()
     config['port'] = int(port_input) if port_input else default_port
     config['username'] = input(f"{Colors.CYAN}Username: {Colors.END}").strip()
-    config['password'] = getpass.getpass(f"{Colors.CYAN}Password: {Colors.END}")
+    
+    # Get password with * masking
+    config['password'] = get_password_with_stars(f"{Colors.CYAN}Password: {Colors.END}")
+    
+    # Get monitoring interval
+    interval_input = input(f"{Colors.CYAN}Monitoring interval in seconds (default 60): {Colors.END}").strip()
+    try:
+        config['interval'] = int(interval_input) if interval_input else 60
+    except ValueError:
+        print(f"{Colors.YELLOW}Invalid interval. Using default 60 seconds.{Colors.END}")
+        config['interval'] = 60
     
     # Validate credentials and get remote folder
     ftp_client = FTPClient(
@@ -638,6 +700,7 @@ def main():
     logger.info(f"Protocol: {'SFTP' if config['use_sftp'] else 'FTP'}")
     logger.info(f"Remote folder: {config['remote_folder']}")
     logger.info(f"Local folder: {config['local_folder']}")
+    logger.info(f"Check interval: {config.get('interval', 60)} seconds")
     direction_text = "REMOTE (download changes from server)" if config['monitor_remote'] else "LOCAL (upload changes to server)"
     logger.info(f"Monitoring: {direction_text}")
     
@@ -647,6 +710,7 @@ def main():
     print(f"{Colors.CYAN}Username:{Colors.END} {config['username']}")
     print(f"{Colors.CYAN}Remote Folder:{Colors.END} {config['remote_folder']}")
     print(f"{Colors.CYAN}Local Folder:{Colors.END} {config['local_folder']}")
+    print(f"{Colors.CYAN}Check Interval:{Colors.END} {config.get('interval', 60)} seconds")
     direction_text = "REMOTE (download changes from server)" if config['monitor_remote'] else "LOCAL (upload changes to server)"
     print(f"{Colors.CYAN}Monitoring:{Colors.END} {direction_text}")
     
